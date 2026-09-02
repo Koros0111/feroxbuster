@@ -713,7 +713,7 @@ pub fn initialize() -> Command {
     /////////////////////////////////////////////////////////////////////
     // group - miscellaneous
     /////////////////////////////////////////////////////////////////////
-    let mut app = app
+    let app = app
         .group(
             ArgGroup::new("output_files")
                 .args(["debug_log", "output", "silent"])
@@ -728,12 +728,24 @@ pub fn initialize() -> Command {
             Arg::new("update_app")
                 .short('U')
                 .long("update")
-                .exclusive(true)
                 .num_args(0)
                 .help_heading("Update settings")
-                .help("Update feroxbuster to the latest version"),
+                .help("Update feroxbuster to the latest version (--insecure and --server-certs are honored)"),
         )
         .after_long_help(EPILOGUE);
+
+    // --update is meant to run standalone, same as the old `exclusive(true)` behavior, but
+    // --insecure/--server-certs configure the client self_update uses to reach github, so those
+    // two need to be allowed alongside it (see https://github.com/epi052/feroxbuster/issues/1148).
+    // computing the conflict list instead of hand-maintaining it keeps every other arg exclusive
+    // with --update without needing to remember to add new args to a manual list
+    let update_compatible_args = ["update_app", "insecure", "server_certs", "help", "version"];
+    let update_conflicts: Vec<clap::Id> = app
+        .get_arguments()
+        .filter(|arg| !update_compatible_args.contains(&arg.get_id().as_str()))
+        .map(|arg| arg.get_id().clone())
+        .collect();
+    let mut app = app.mut_arg("update_app", |arg| arg.conflicts_with_all(update_conflicts));
 
     /////////////////////////////////////////////////////////////////////
     // end parser
@@ -864,5 +876,59 @@ mod tests {
 
         let space_between_rejected = "1 4m";
         assert!(valid_time_spec(space_between_rejected).is_err());
+    }
+
+    #[test]
+    /// --update alone should parse fine (baseline exclusivity behavior, unchanged)
+    fn update_alone_is_allowed() {
+        let result = initialize().try_get_matches_from(["feroxbuster", "--update"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    /// --update combined with -k/--insecure should parse fine now; this is the crux of the
+    /// #1148 fix, so this is a real clap-conflict-table assertion, not just a smoke test
+    fn update_allows_insecure() {
+        let result = initialize().try_get_matches_from(["feroxbuster", "--update", "--insecure"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    /// --update combined with --server-certs should also parse fine
+    fn update_allows_server_certs() {
+        let result = initialize().try_get_matches_from([
+            "feroxbuster",
+            "--update",
+            "--server-certs",
+            "some_cert.pem",
+        ]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    /// order shouldn't matter for the two allowed flags
+    fn update_allows_insecure_reversed_order() {
+        let result = initialize().try_get_matches_from(["feroxbuster", "--insecure", "--update"]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    /// --update should still conflict with --url, same as every other unrelated flag
+    fn update_still_conflicts_with_url() {
+        let result = initialize().try_get_matches_from([
+            "feroxbuster",
+            "--update",
+            "--url",
+            "http://localhost",
+        ]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    /// --update should still conflict with flags that have nothing to do with the client,
+    /// confirming the allowlist didn't accidentally widen beyond --insecure/--server-certs
+    fn update_still_conflicts_with_verbosity() {
+        let result = initialize().try_get_matches_from(["feroxbuster", "--update", "-v"]);
+        assert!(result.is_err());
     }
 }
